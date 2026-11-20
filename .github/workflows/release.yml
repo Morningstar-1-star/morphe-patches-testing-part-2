@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Android Morphe Patches (.mpp)
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x gradlew
+          ./gradlew buildAndroid --no-daemon
+          MPP_FILE=$(ls patches/build/libs/patches-*.mpp | grep -vE '(-sources|-javadoc)\.mpp$' | head -n 1)
+          cp "$MPP_FILE" patches/build/libs/venom-patches.mpp
+
+      - name: Upload .mpp Artifact (Backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: venom-patches-mpp
+          path: patches/build/libs/venom-patches.mpp
+
+      - name: Publish Direct .mpp to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.3.0-venom.${{ github.run_number }}
+          name: Venom Patches v2.3.0 (Build ${{ github.run_number }})
+          body: "Latest Morphe patches + inline Playlist/Watch Later tags and fixed Comment word tags."
+          files: patches/build/libs/venom-patches.mpp
+
+      - name: Update patches-bundle.json for Source URL
+        run: |
+          git checkout -- .
+          rm -f morphe-signing.pub
+          TAG="v2.3.0-venom.${{ github.run_number }}"
+          cat <<EOF > patches-bundle.json
+          {
+            "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%S")",
+            "description": "Venom Custom Morphe Patches",
+            "download_url": "https://github.com/${{ github.repository }}/releases/download/${TAG}/venom-patches.mpp",
+            "signature_download_url": "",
+            "version": "2.3.0-venom.${{ github.run_number }}"
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A patches-bundle.json morphe-signing.pub
+          git diff --staged --quiet || git commit -m "chore: update patches-bundle.json [skip ci]"
+          git pull --rebase --autostash
+          git push
