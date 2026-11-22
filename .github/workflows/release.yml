@@ -52,13 +52,13 @@ jobs:
         with:
           tag_name: v2.3.0-venom.${{ github.run_number }}
           name: Venom Patches v2.3.0 (Build ${{ github.run_number }})
-          body: "Latest Morphe patches + inline Playlist/Watch Later tags and fixed Comment word tags."
+          body: "Latest Morphe patches + fixed Comment word tags."
           files: patches/build/libs/venom-patches.mpp
 
       - name: Update patches-bundle.json for Source URL
         run: |
           git checkout -- .
-          rm -f morphe-signing.pub
+          git rm -f --ignore-unmatch morphe-signing.pub
           TAG="v2.3.0-venom.${{ github.run_number }}"
           cat <<EOF > patches-bundle.json
           {
@@ -71,7 +71,8 @@ jobs:
           EOF
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A patches-bundle.json morphe-signing.pub
+          git add -A patches-bundle.json
           git diff --staged --quiet || git commit -m "chore: update patches-bundle.json [skip ci]"
           git pull --rebase --autostash
           git push
+          
