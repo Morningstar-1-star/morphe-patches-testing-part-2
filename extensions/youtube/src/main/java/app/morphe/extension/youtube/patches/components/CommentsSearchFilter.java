@@ -33,6 +33,8 @@ import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 
+import com.google.protobuf.InvalidProtocolBufferException;
+
 import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -60,13 +62,16 @@ import app.morphe.extension.shared.patches.components.StringFilterGroup;
 import app.morphe.extension.shared.theme.ThemeUtils;
 import app.morphe.extension.shared.ui.CustomDialog;
 import app.morphe.extension.shared.ui.Dim;
+import app.morphe.extension.youtube.innertube.ElementTexts.CommentData;
+import app.morphe.extension.youtube.innertube.ElementTexts.Element;
+import app.morphe.extension.youtube.innertube.ElementTexts.ElementModel;
 import app.morphe.extension.youtube.patches.VideoInformation;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.EngagementPanel;
 
 /**
- * Shows only comments matching searched words, displays an accurate real-word top tag strip
- * (stripping YouTube UI/a11y metadata), and wires PlaylistInlineTagsManager into list views.
+ * Filters comments by search/tag word and builds an accurate top-word chip bar
+ * strictly from Morphe's ElementTexts.CommentModel body field (zero base64/UI junk).
  */
 @SuppressWarnings("unused")
 public final class CommentsSearchFilter extends Filter {
@@ -94,14 +99,6 @@ public final class CommentsSearchFilter extends Filter {
         }
     }
 
-    private static final class CommentRecord {
-        final String[] chunks;
-
-        CommentRecord(String[] chunks) {
-            this.chunks = chunks;
-        }
-    }
-
     private static final String SEARCH_BUTTON_TAG = "morphe_search_comments_button";
     private static final String WORD_TAG_BAR_TAG = "venom_comment_word_tag_bar";
 
@@ -123,61 +120,15 @@ public final class CommentsSearchFilter extends Filter {
     private static final int MIN_ID_LENGTH = 24;
     private static final int MAX_IDS_PER_COMMENT = 40;
     private static final int MAX_IDS = 4000;
-    private static final int MAX_SESSION_COMMENTS = 350;
+    private static final int MAX_SESSION_COMMENTS = 400;
 
     private static final Pattern SEARCH_TERM_PATTERN = Pattern.compile("\"([^\"]*)\"|(\\S+)");
-    private static final Pattern WORD_PATTERN = Pattern.compile("[\\p{L}][\\p{L}\\p{Mn}]{2,18}");
-    private static final Pattern TIMESTAMP_PATTERN = Pattern.compile(
-            "^\\d+\\s+(sec|second|min|minute|hr|hour|day|week|month|year)s?\\s+ago(\\s*\\(edited\\))?$"
-    );
-    private static final Pattern CLOCK_TIME_PATTERN = Pattern.compile("^\\d{1,2}:\\d{2}(:\\d{2})?$");
-    private static final Pattern REPLIES_COUNT_PATTERN = Pattern.compile(
-            "^(view\\s+)?[\\d.,]+[kmb]?\\s+repl(y|ies)$"
-    );
-    private static final Pattern PURE_NUMBER_PATTERN = Pattern.compile("^[\\d.,+\\-/#:%]+[kmb]?$");
-    private static final Pattern CAMEL_ID_PATTERN = Pattern.compile("^[a-z]+[A-Z][a-zA-Z0-9]*$");
-    private static final Pattern PROTO_FALLBACK_SPLIT = Pattern.compile("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\uFFFD]+");
-
-    private static final String[] UI_PHRASE_BLACKLIST = {
-            "dislike this comment",
-            "like this comment",
-            "remove like",
-            "remove dislike",
-            "action menu",
-            "creator heart",
-            "love this comment",
-            "give a heart",
-            "remove heart",
-            "add a reply",
-            "add a comment",
-            "reply to ",
-            "translate to ",
-            "see original",
-            "translated by",
-            "highlighted comment",
-            "pinned by ",
-            "read more",
-            "show less",
-            "more options",
-            "comment options",
-            "go to channel",
-            "other people",
-            "others liked",
-            "double tap",
-            "tap to ",
-            "view replies",
-            "view all replies",
-            "hide replies",
-            "sorted by",
-            "top comments",
-            "newest first",
-            "members only",
-            "commented on",
-            "sponsored",
-            "super thanks"
-    };
+    // \p{M} includes both Mn and Mc (so Hindi/Punjabi vowel signs like ा ी ु stay attached)
+    private static final Pattern WORD_PATTERN = Pattern.compile("[\\p{L}][\\p{L}\\p{M}]{2,24}");
+    private static final Pattern URL_PATTERN = Pattern.compile("https?://\\S+|www\\.\\S+");
 
     private static final Set<String> STOP_WORDS = new HashSet<>(Arrays.asList(
+            // English glue words
             "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her",
             "was", "one", "our", "out", "day", "get", "has", "him", "his", "how", "its",
             "may", "new", "now", "old", "see", "two", "way", "who", "did", "let", "put",
@@ -193,28 +144,32 @@ public final class CommentsSearchFilter extends Filter {
             "good", "great", "nice", "best", "well", "back", "come", "came", "want", "need",
             "look", "feel", "take", "took", "give", "gave", "keep", "tell", "told", "said",
             "says", "many", "most", "such", "same", "than", "over", "under", "again", "ever",
+            "video", "videos", "youtube", "channel", "watch", "watching", "watched", "comment",
+            "comments", "reply", "replies", "bro", "man", "guy", "guys", "lol", "lmao",
+            // Hinglish glue words
             "hai", "hain", "nahi", "nhi", "kya", "mein", "bhi", "aur", "tha", "thi", "kuch",
             "toh", "kar", "karo", "karna", "kiya", "koi", "woh", "yeh", "aap", "hum", "tum",
             "par", "sab", "abhi", "kaise", "kyun", "kyu", "hume", "mera", "meri", "mere",
             "tera", "teri", "tere", "uska", "uski", "unke", "iske", "liye", "wala", "wali",
             "wale", "raha", "rahi", "rahe", "hoga", "hogi", "hote", "hota", "hoti", "baat",
             "bahut", "bohot", "ekdum", "sirf", "phir", "agar", "lekin", "magar", "jaise",
-            "waise", "kaha", "kahan", "yahan", "wahan", "jab", "tab", "tak",
-            "video", "videos", "youtube", "channel", "watch", "watching", "watched",
-            "comment", "comments", "reply", "replies", "read", "show", "less", "translated",
-            "translate", "original", "pinned", "liked", "likes", "dislike", "dislikes",
-            "remove", "action", "menu", "heart", "cancel", "report", "share", "edited",
-            "creator", "subscribe", "subscribed", "subscribers", "views", "view", "days",
-            "hours", "minutes", "seconds", "weeks", "months", "years", "ago", "hindi",
-            "english", "button", "icon", "avatar", "profile", "badge", "verified", "member",
-            "members", "open", "close", "hide", "tap", "double", "options"
+            "waise", "kaha", "kahan", "yahan", "wahan", "jab", "tab", "tak", "yaar", "bhai",
+            "bada", "chahiye", "aaj", "kal", "log", "sabhi", "kisi", "apna", "apne", "apni",
+            // Hindi Devanagari glue words
+            "है", "हैं", "को", "के", "का", "की", "में", "से", "पर", "भी", "और", "ये", "यह",
+            "वो", "वह", "नहीं", "क्या", "तो", "कर", "रहा", "रही", "रहे", "हो", "था", "थी",
+            "थे", "एक", "ही", "इस", "उस", "ने", "लिए", "बहुत", "सब", "अब", "जब", "तक",
+            "अगर", "लेकिन", "करके", "करना", "किया", "गया", "गई", "गए", "होता", "होती",
+            "होते", "साथ", "बाद", "पहले", "आप", "हम", "तुम", "मेरा", "मेरी", "मेरे", "उनके",
+            "इनके", "वाले", "वाला", "वाली", "देगा", "देगी", "भाई"
     ));
 
+    // Session-Only RAM state (cleared automatically when video switches)
     private static final Object SESSION_LOCK = new Object();
     private static volatile String trackedVideoId = "";
     private static volatile String selectedWordTag = "";
     private static final Set<String> countedCommentKeys = new HashSet<>();
-    private static final List<CommentRecord> sessionComments = new ArrayList<>();
+    private static final Map<String, Integer> sessionWordDocFreq = new HashMap<>();
     private static final AtomicBoolean uiRefreshScheduled = new AtomicBoolean(false);
     private static volatile WeakReference<View> activeCommentsPanelRef = new WeakReference<>(null);
     private static volatile WeakReference<View> activeSearchButtonRef = new WeakReference<>(null);
@@ -293,14 +248,30 @@ public final class CommentsSearchFilter extends Filter {
             return false;
         }
 
-        List<String> extractedBodyChunks = extractCleanCommentChunks(buffer, false);
-        recordCommentInSession(path, buffer, extractedBodyChunks);
+        // Parse strictly via Morphe's ElementTexts protobuf schema (ZERO raw byte / base64 leakage)
+        CommentData commentData = parseCommentData(buffer);
+        String realBody = "";
+        String realAuthor = "";
+        if (commentData != null) {
+            realBody = commentData.getProperties().getContent().getContent();
+            realAuthor = commentData.getAuthor().getDisplayName();
+            recordRealCommentBody(realAuthor, realBody);
+        } else {
+            final int bufferSize = buffer.length;
+            Logger.printDebug(() -> "Comment parse returned null, buffer size: " + bufferSize);
+        }
 
         if (!searchActive) {
             return false;
         }
 
-        String searchableText = buildSearchableText(buffer, extractedBodyChunks);
+        String searchableText;
+        if (!realBody.isEmpty() || !realAuthor.isEmpty()) {
+            searchableText = foldCase(realBody + "\n" + realAuthor);
+        } else {
+            searchableText = foldCase(new String(buffer, StandardCharsets.UTF_8));
+        }
+
         final boolean hidden = !containsAllTerms(searchableText, terms);
         String commentPath = path.toString();
         CommentDecision decision = new CommentDecision(commentPath, terms, hidden);
@@ -309,6 +280,34 @@ public final class CommentsSearchFilter extends Filter {
 
         Logger.printDebug(() -> (hidden ? "Hiding comment: " : "Showing comment: ") + commentPath);
         return hidden;
+    }
+
+    @Nullable
+    private static CommentData parseCommentData(byte[] buffer) {
+        try {
+            ElementModel model = findCommentModel(Element.parseFrom(buffer));
+            return model != null ? model.getCommentModel().getData() : null;
+        } catch (InvalidProtocolBufferException ex) {
+            return null;
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "parseCommentData failure: " + ex.getMessage());
+            return null;
+        }
+    }
+
+    @Nullable
+    private static ElementModel findCommentModel(Element element) {
+        ElementModel model = element.getType().getComponentType().getModel();
+        if (model.hasCommentModel()) {
+            return model;
+        }
+        for (Element child : element.getChildrenList()) {
+            ElementModel childModel = findCommentModel(child);
+            if (childModel != null) {
+                return childModel;
+            }
+        }
+        return null;
     }
 
     private static void ensureCurrentVideoSession() {
@@ -321,248 +320,60 @@ public final class CommentsSearchFilter extends Filter {
                 trackedVideoId = currentVideoId;
                 selectedWordTag = "";
                 countedCommentKeys.clear();
-                sessionComments.clear();
+                sessionWordDocFreq.clear();
             }
         }
     }
 
-    private static void recordCommentInSession(CharSequence path, byte[] buffer, List<String> cleanChunks) {
-        if (cleanChunks.isEmpty()) {
+    private static void recordRealCommentBody(String author, String body) {
+        if (body == null) {
             return;
         }
+        String trimmed = body.trim();
+        if (trimmed.length() < 3) {
+            return;
+        }
+
         try {
             ensureCurrentVideoSession();
-            List<String> ids = findIds(buffer);
-            String dedupeKey = !ids.isEmpty() ? ids.get(0) : path.toString();
+            String dedupeKey = (author != null ? author : "") + "|" + trimmed;
 
-            boolean added;
+            // Strip URLs before extracting words so promo links don't pollute tags
+            String cleaned = URL_PATTERN.matcher(foldCase(trimmed)).replaceAll(" ");
+            Set<String> uniqueWords = new HashSet<>();
+            Matcher m = WORD_PATTERN.matcher(cleaned);
+            while (m.find()) {
+                String word = m.group();
+                if (!STOP_WORDS.contains(word)) {
+                    uniqueWords.add(word);
+                }
+            }
+
+            if (uniqueWords.isEmpty()) {
+                return;
+            }
+
+            boolean updated = false;
             synchronized (SESSION_LOCK) {
-                if (sessionComments.size() >= MAX_SESSION_COMMENTS) {
+                if (countedCommentKeys.size() >= MAX_SESSION_COMMENTS) {
                     return;
                 }
                 if (!countedCommentKeys.add(dedupeKey)) {
                     return;
                 }
-                sessionComments.add(new CommentRecord(cleanChunks.toArray(new String[0])));
-                added = true;
+                for (String w : uniqueWords) {
+                    Integer prev = sessionWordDocFreq.get(w);
+                    sessionWordDocFreq.put(w, prev == null ? 1 : prev + 1);
+                }
+                updated = true;
             }
 
-            if (added) {
+            if (updated) {
                 scheduleTopTagBarRefresh();
             }
         } catch (Exception ex) {
-            Logger.printDebug(() -> "Word tag count error: " + ex.getMessage());
+            Logger.printDebug(() -> "recordRealCommentBody failure: " + ex.getMessage());
         }
-    }
-
-    private static String buildSearchableText(byte[] buffer, List<String> bodyChunks) {
-        StringBuilder sb = new StringBuilder();
-        for (String chunk : bodyChunks) {
-            sb.append(chunk).append('\n');
-        }
-        List<String> allStrings = extractAllUtf8Strings(buffer);
-        for (String s : allStrings) {
-            String trimmed = s.trim();
-            if (trimmed.startsWith("@") && trimmed.length() >= 3 && trimmed.indexOf(' ') < 0) {
-                sb.append(trimmed).append('\n');
-            }
-        }
-        if (sb.length() == 0) {
-            return foldCase(new String(buffer, StandardCharsets.UTF_8));
-        }
-        return foldCase(sb.toString());
-    }
-
-    private static List<String> extractCleanCommentChunks(byte[] buffer, boolean includeHandles) {
-        List<String> rawStrings = extractAllUtf8Strings(buffer);
-        List<String> clean = new ArrayList<>();
-        Set<String> seenInComment = new HashSet<>();
-
-        for (String raw : rawStrings) {
-            String trimmed = raw.trim();
-            if (isUiOrMetadataChunk(trimmed, includeHandles)) {
-                continue;
-            }
-            String folded = foldCase(trimmed);
-            if (seenInComment.add(folded)) {
-                clean.add(folded);
-            }
-        }
-        return clean;
-    }
-
-    private static List<String> extractAllUtf8Strings(byte[] buffer) {
-        List<String> results = new ArrayList<>();
-        boolean parsed = parseProtobufMessage(buffer, 0, buffer.length, 0, results);
-        if (!parsed || results.isEmpty()) {
-            String rawUtf8 = new String(buffer, StandardCharsets.UTF_8);
-            String[] parts = PROTO_FALLBACK_SPLIT.split(rawUtf8);
-            for (String p : parts) {
-                String t = p.trim();
-                if (t.length() >= 3) {
-                    results.add(t);
-                }
-            }
-        }
-        return results;
-    }
-
-    private static boolean parseProtobufMessage(byte[] data, int start, int end, int depth, List<String> out) {
-        if (depth > 10 || start >= end) {
-            return false;
-        }
-        int pos = start;
-        int fieldCount = 0;
-
-        while (pos < end) {
-            long tag = 0;
-            int shift = 0;
-            while (pos < end && shift < 64) {
-                int b = data[pos++] & 0xFF;
-                tag |= (long) (b & 0x7F) << shift;
-                if ((b & 0x80) == 0) {
-                    break;
-                }
-                shift += 7;
-            }
-            int wireType = (int) (tag & 0x07);
-            long fieldNumber = tag >>> 3;
-            if (fieldNumber <= 0 || fieldNumber > 536870911L) {
-                return false;
-            }
-
-            switch (wireType) {
-                case 0:
-                    int varintBytes = 0;
-                    while (pos < end && varintBytes < 10) {
-                        int b = data[pos++] & 0xFF;
-                        varintBytes++;
-                        if ((b & 0x80) == 0) {
-                            break;
-                        }
-                    }
-                    break;
-                case 1:
-                    pos += 8;
-                    if (pos > end) return false;
-                    break;
-                case 2:
-                    int len = 0;
-                    int lenShift = 0;
-                    while (pos < end && lenShift < 32) {
-                        int b = data[pos++] & 0xFF;
-                        len |= (b & 0x7F) << lenShift;
-                        if ((b & 0x80) == 0) {
-                            break;
-                        }
-                        lenShift += 7;
-                    }
-                    if (len < 0 || pos + len > end) {
-                        return false;
-                    }
-                    if (len >= 2) {
-                        boolean hasCtrl = hasBinaryControlByte(data, pos, len);
-                        boolean nestedCandidate = hasCtrl
-                                || (len >= 3 && data[pos] == 0x0A && (data[pos + 1] & 0xFF) == len - 2);
-                        boolean parsedNested = false;
-                        if (nestedCandidate) {
-                            List<String> nestedOut = new ArrayList<>();
-                            if (parseProtobufMessage(data, pos, pos + len, depth + 1, nestedOut)) {
-                                out.addAll(nestedOut);
-                                parsedNested = true;
-                            }
-                        }
-                        if (!parsedNested && !hasCtrl && isValidPrintableUtf8(data, pos, len)) {
-                            out.add(new String(data, pos, len, StandardCharsets.UTF_8));
-                        }
-                    }
-                    pos += len;
-                    break;
-                case 5:
-                    pos += 4;
-                    if (pos > end) return false;
-                    break;
-                default:
-                    return false;
-            }
-            fieldCount++;
-        }
-        return pos == end && fieldCount > 0;
-    }
-
-    private static boolean hasBinaryControlByte(byte[] data, int offset, int len) {
-        int limit = offset + len;
-        for (int i = offset; i < limit; i++) {
-            int b = data[i] & 0xFF;
-            if (b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isValidPrintableUtf8(byte[] data, int offset, int len) {
-        if (len > 4000) {
-            return false;
-        }
-        String s = new String(data, offset, len, StandardCharsets.UTF_8);
-        int letters = 0;
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '\uFFFD') {
-                return false;
-            }
-            if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
-                return false;
-            }
-            if (Character.isLetter(c)) {
-                letters++;
-            }
-        }
-        return letters >= 2;
-    }
-
-    private static boolean isUiOrMetadataChunk(String trimmed, boolean includeHandles) {
-        int len = trimmed.length();
-        if (len < 3 || len > 1200) {
-            return true;
-        }
-        if (!includeHandles && trimmed.startsWith("@")) {
-            return true;
-        }
-        if (trimmed.contains("http://") || trimmed.contains("https://")
-                || trimmed.contains("www.") || trimmed.contains(".eml")
-                || trimmed.contains(".png") || trimmed.contains(".jpg")
-                || trimmed.contains(".webp") || trimmed.contains("youtube.com")
-                || trimmed.contains("youtu.be") || trimmed.contains("ggpht.com")
-                || trimmed.contains("googleusercontent") || trimmed.contains("engagement-panel")
-                || trimmed.contains("comment-item") || trimmed.contains("browse_id")) {
-            return true;
-        }
-
-        if (trimmed.indexOf(' ') < 0) {
-            if (trimmed.contains("_") || trimmed.contains("/") || trimmed.contains("=")
-                    || trimmed.startsWith("Ug") || trimmed.startsWith("UC")
-                    || CAMEL_ID_PATTERN.matcher(trimmed).matches()) {
-                return true;
-            }
-        }
-
-        String lower = foldCase(trimmed);
-        if (PURE_NUMBER_PATTERN.matcher(lower).matches()
-                || CLOCK_TIME_PATTERN.matcher(lower).matches()
-                || TIMESTAMP_PATTERN.matcher(lower).matches()
-                || REPLIES_COUNT_PATTERN.matcher(lower).matches()) {
-            return true;
-        }
-
-        for (String uiPhrase : UI_PHRASE_BLACKLIST) {
-            if (lower.contains(uiPhrase)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static void scheduleTopTagBarRefresh() {
@@ -576,61 +387,21 @@ public final class CommentsSearchFilter extends Filter {
             if (panel != null && panel.isShown()) {
                 renderTopWordTagStrip(panel, searchBtn);
             }
-        }, 350L);
+        }, 300L);
     }
 
     private static WordCount[] getTopUsedWords(int maxCount) {
-        List<CommentRecord> snapshot;
+        List<WordCount> entries = new ArrayList<>();
         synchronized (SESSION_LOCK) {
-            if (sessionComments.isEmpty()) {
+            if (sessionWordDocFreq.isEmpty()) {
                 return new WordCount[0];
             }
-            snapshot = new ArrayList<>(sessionComments);
-        }
-
-        int totalComments = snapshot.size();
-
-        Map<String, Integer> exactChunkDocFreq = new HashMap<>();
-        for (CommentRecord rec : snapshot) {
-            for (String chunk : rec.chunks) {
-                Integer prev = exactChunkDocFreq.get(chunk);
-                exactChunkDocFreq.put(chunk, prev == null ? 1 : prev + 1);
-            }
-        }
-
-        Map<String, Integer> wordDocFreq = new HashMap<>();
-        for (CommentRecord rec : snapshot) {
-            Set<String> wordsInComment = new HashSet<>();
-            for (String chunk : rec.chunks) {
-                Integer chunkCount = exactChunkDocFreq.get(chunk);
-                if (totalComments >= 4 && chunkCount != null
-                        && chunkCount >= 3 && (chunkCount * 100 / totalComments) >= 30) {
-                    continue;
-                }
-                Matcher matcher = WORD_PATTERN.matcher(chunk);
-                while (matcher.find()) {
-                    String word = matcher.group();
-                    if (!STOP_WORDS.contains(word)) {
-                        wordsInComment.add(word);
-                    }
+            for (String word : sessionWordDocFreq.keySet()) {
+                Integer count = sessionWordDocFreq.get(word);
+                if (count != null && count >= 2) {
+                    entries.add(new WordCount(word, count));
                 }
             }
-            for (String w : wordsInComment) {
-                Integer prev = wordDocFreq.get(w);
-                wordDocFreq.put(w, prev == null ? 1 : prev + 1);
-            }
-        }
-
-        List<WordCount> entries = new ArrayList<>();
-        for (String key : wordDocFreq.keySet()) {
-            Integer val = wordDocFreq.get(key);
-            if (val == null || val < 2) {
-                continue;
-            }
-            if (totalComments >= 10 && (val * 100 / totalComments) > 92) {
-                continue;
-            }
-            entries.add(new WordCount(key, val));
         }
 
         entries.sort((a, b) -> Integer.compare(b.count, a.count));
@@ -747,6 +518,7 @@ public final class CommentsSearchFilter extends Filter {
         LinearLayout pill = new LinearLayout(context);
         pill.setOrientation(LinearLayout.HORIZONTAL);
         pill.setGravity(Gravity.CENTER_VERTICAL);
+        pill.setMinimumHeight(dp(context, 32));
         pill.setPadding(dp(context, 12), dp(context, 6), dp(context, 10), dp(context, 6));
 
         GradientDrawable pillBg = new GradientDrawable();
@@ -761,8 +533,8 @@ public final class CommentsSearchFilter extends Filter {
         String displayWord = Character.toUpperCase(word.charAt(0)) + word.substring(1);
         TextView wordView = new TextView(context);
         wordView.setText(displayWord);
-        wordView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        wordView.setTypeface(Typeface.DEFAULT_BOLD);
+        wordView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        wordView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         wordView.setTextColor(isSelected
                 ? (isDarkMode ? Color.parseColor("#0F0F0F") : Color.WHITE)
                 : (isDarkMode ? Color.parseColor("#F1F1F1") : Color.parseColor("#0F0F0F")));
@@ -770,7 +542,7 @@ public final class CommentsSearchFilter extends Filter {
 
         TextView countView = new TextView(context);
         countView.setText(String.valueOf(count));
-        countView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        countView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         countView.setTextColor(isSelected
                 ? (isDarkMode ? Color.parseColor("#3F3F3F") : Color.parseColor("#DDDDDD"))
                 : (isDarkMode ? Color.parseColor("#AAAAAA") : Color.parseColor("#606060")));
@@ -930,7 +702,6 @@ public final class CommentsSearchFilter extends Filter {
         try {
             View listView = sectionList.patch_getListView();
             if (listView != null) {
-                PlaylistInlineTagsManager.attach(listView);
                 if (Settings.SEARCH_COMMENTS.get()) {
                     sectionLists.put(listView, new SectionListHolder(sectionList));
                 }
@@ -1134,3 +905,4 @@ public final class CommentsSearchFilter extends Filter {
         }
     }
 }
+
